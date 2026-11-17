@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="420" viewBox="0 0 1000 420">
+<rect width="1000" height="420" rx="28" fill="#f7f9fc"/>
+<text x="60" y="70" font-family="Arial, sans-serif" font-size="32" font-weight="700" fill="#172033">Out-of-sample forecast evaluation</text>
+<text x="60" y="110" font-family="Arial, sans-serif" font-size="18" fill="#5c667a">411 monthly observations · 1992–2026 · common 36-month holdout</text>
+<rect x="60" y="155" width="260" height="170" rx="20" fill="#ffffff" stroke="#d9e0eb"/>
+<text x="90" y="205" font-family="Arial, sans-serif" font-size="16" fill="#6b7485">BEST HOLDOUT MAPE</text>
+<text x="90" y="275" font-family="Arial, sans-serif" font-size="62" font-weight="700" fill="#1f7a55">1.41%</text>
+<rect x="355" y="155" width="585" height="170" rx="20" fill="#ffffff" stroke="#d9e0eb"/>
+<text x="385" y="205" font-family="Arial, sans-serif" font-size="16" fill="#6b7485">MODEL FAMILIES COMPARED</text>
+<text x="385" y="250" font-family="Arial, sans-serif" font-size="22" font-weight="600" fill="#25324a">ARIMA · ETS · Naive · Drift · NNAR</text>
+<text x="385" y="292" font-family="Arial, sans-serif" font-size="17" fill="#5c667a">Selected using the same out-of-sample evaluation window</text>
+<line x1="60" y1="360" x2="940" y2="360" stroke="#d9e0eb"/>
+<text x="60" y="392" font-family="Arial, sans-serif" font-size="15" fill="#7b8494">Portfolio summary — full modeling workflow and diagnostics are preserved in the R Markdown source.</text>
+</svg>
