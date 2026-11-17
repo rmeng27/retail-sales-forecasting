@@ -1,0 +1,619 @@
+---
+title: 'Final Project: Analysis on the U.S. Monthly Retail and Food Services Sales'
+author: "Ran Meng"
+date: "2026-05-09"
+output:
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: true
+      smooth_scroll: true
+---
+# Dataset Introduction and Initial Investigation
+For this project, I chose the monthly U.S. retail and food services sales data from the U.S. Census Bureau’s Monthly Retail Trade Survey. The dataset records total retail trade and food services sales in the United States, measured in millions of dollars. The observations are monthly and cover the period from January 1992 to March 2026, giving a total of 411 observations. This length is useful for time series modeling because it provides enough historical information to study long-term movement, dependence over time, structural shocks, and forecasting performance.
+
+The series used in this analysis is the seasonally adjusted version of retail and food services sales. This means that recurring calendar-based seasonal effects have already been adjusted by the Census Bureau. Because of that, the main focus of this project is not raw month-to-month seasonality, but rather the long-term trend, persistence, shocks, and forecastability of the series. This is still a meaningful time series problem because retail sales are closely connected to consumer spending, business activity, and broader macroeconomic conditions. The data are also appropriate for a more applied project because forecasting retail sales has practical value for economic monitoring, business planning, and policy-related analysis. The Census data are also available through FRED, where the series is listed as monthly, seasonally adjusted, measured in millions of dollars, and sourced from the U.S. Census Bureau.
+
+## Setup
+```{r}
+library(tidyverse)
+library(forecast)
+library(tseries)
+library(astsa)
+
+url <- "https://www.census.gov/retail/marts/www/adv44X72.txt"
+
+raw_lines <- readLines(url)
+raw_text <- paste(raw_lines, collapse = " ")
+
+# Extract only the seasonally adjusted retail sales block
+sales_text <- raw_text %>%
+  str_replace(".*RETAIL & FOOD SERVICES YEAR JAN FEB MAR APR MAY JUN JUL AUG SEP OCT NOV DEC ", "") %>%
+  str_replace(" SEASONAL FACTORS.*", "")
+
+sales_tokens <- str_split(sales_text, "\\s+")[[1]]
+sales_tokens <- sales_tokens[sales_tokens != ""]
+
+# Keep only numeric-looking tokens
+sales_tokens_clean <- sales_tokens[str_detect(sales_tokens, "^\\d+(\\.\\d+)?$")]
+
+# Find year positions
+sales_year_pos <- which(
+  as.integer(sales_tokens_clean) >= 1992 &
+    as.integer(sales_tokens_clean) <= 2026
+)
+
+months <- 1:12
+sales_list <- list()
+
+for (k in seq_along(sales_year_pos)) {
+  year <- as.integer(sales_tokens_clean[sales_year_pos[k]])
+  
+  start <- sales_year_pos[k] + 1
+  end <- ifelse(
+    k < length(sales_year_pos),
+    sales_year_pos[k + 1] - 1,
+    length(sales_tokens_clean)
+  )
+  
+  values <- as.numeric(sales_tokens_clean[start:end])
+  
+  temp <- data.frame(
+    year = year,
+    month = months[1:length(values)],
+    adjusted_sales = values
+  )
+  
+  sales_list[[k]] <- temp
+}
+
+retail_df <- bind_rows(sales_list) %>%
+  mutate(
+    date = as.Date(paste(year, month, "01", sep = "-"))
+  ) %>%
+  select(date, year, month, adjusted_sales)
+
+head(retail_df)
+tail(retail_df)
+summary(retail_df)
+```
+
+## Create the time series object
+```{r}
+# Seasonally adjusted series
+retail_ts <- ts(
+  retail_df$adjusted_sales,
+  start = c(1992, 1),
+  frequency = 12
+)
+
+log_retail_ts <- log(retail_ts)
+```
+
+## First plots
+```{r}
+par(mfrow = c(2, 1))
+
+plot(retail_ts,
+     main = "Seasonally Adjusted U.S. Retail and Food Services Sales",
+     ylab = "Millions of Dollars",
+     xlab = "Year")
+
+plot(log_retail_ts,
+     main = "Log Seasonally Adjusted U.S. Retail and Food Services Sales",
+     ylab = "Log Sales",
+     xlab = "Year")
+
+par(mfrow = c(1, 1))
+```
+The initial plot of the seasonally adjusted retail sales series shows a clear upward trend from 1992 through 2026. Sales begin at approximately 159,000 million dollars in early 1992 and reach over 750,000 million dollars by March 2026. This long-run growth pattern immediately suggests that the original series is nonstationary, since the mean level of the series changes over time instead of fluctuating around a constant value. There are also visible disruptions in the series, especially around 2020, where retail sales sharply decline and then rebound quickly. This period likely reflects the major economic shock associated with the COVID-19 pandemic and gives the series additional real-world complexity.
+
+I also examined the log-transformed version of the retail sales series. The log transformation is useful because the scale of the original series increases over time, and logging the data can help stabilize the variance and make growth patterns easier to interpret. After the log transformation, the series appears smoother and the magnitude of variation is less dominated by the later years. However, the log series still has a clear upward trend, so the transformation alone does not make the series stationary.
+## ACF/PACF
+```{r}
+par(mfrow = c(2, 2))
+
+acf(retail_ts,
+    main = "ACF: Retail Sales")
+
+pacf(retail_ts,
+     main = "PACF: Retail Sales")
+
+acf(log_retail_ts,
+    main = "ACF: Log Retail Sales")
+
+pacf(log_retail_ts,
+     main = "PACF: Log Retail Sales")
+
+par(mfrow = c(1, 1))
+```
+The ACF and PACF plots support the same conclusion. For both the original and log-transformed series, the ACF remains strongly positive and decays slowly across many lags. This type of slow decay is a common sign of nonstationarity and strong persistence. The PACF shows a large spike at the first lag, suggesting that each observation is highly related to the immediately previous observation. Together, the time plots and correlation plots indicate that fitting an ARMA model directly to the original or log-transformed series would not be appropriate, because ARMA models require a stationary series.
+
+## Stationarity check
+```{r}
+adf.test(log_retail_ts)
+```
+
+To formally check stationarity, I applied the Augmented Dickey-Fuller test to the log-transformed retail sales series. The test produced a p-value of 0.4709, so I fail to reject the null hypothesis of a unit root. In other words, the test does not provide evidence that the log-transformed series is stationary. This agrees with the visual evidence from the time plot and the slow decay in the ACF. Therefore, the next step in the analysis is to difference the log-transformed series before fitting ARMA or ARIMA-type models.
+
+Overall, the initial investigation shows that this dataset is appropriate for a full time series analysis. The series is long enough to support model training and evaluation, it has a meaningful economic interpretation, and it contains important time series features such as trend, persistence, nonstationarity, and structural disruption. Since the raw log series is nonstationary, the modeling stage will begin by analyzing the first difference of the log-transformed series, which can be interpreted approximately as the monthly growth rate of retail sales.
+
+
+# First Differencing and Stationarity Check
+Since the original log-transformed retail sales series still showed a clear upward trend and failed the initial stationarity check, I next applied first differencing to the log series. This gives the month-to-month change in log retail sales, which can be interpreted approximately as the monthly growth rate of seasonally adjusted retail sales. This transformation is important because ARMA-type models are designed for stationary series, so the original trending log series would not be appropriate to model directly.
+
+## First Differencing
+```{r}
+# First difference of log series
+dlog_retail_ts <- diff(log_retail_ts)
+
+# Plot differenced log series
+plot(dlog_retail_ts,
+     main = "First Difference of Log Retail Sales",
+     ylab = "Differenced Log Sales",
+     xlab = "Year")
+
+# ACF/PACF of differenced log series
+par(mfrow = c(1, 2))
+
+acf(dlog_retail_ts,
+    main = "ACF: Differenced Log Retail Sales")
+
+pacf(dlog_retail_ts,
+     main = "PACF: Differenced Log Retail Sales")
+
+par(mfrow = c(1, 1))
+```
+
+## Stationarity check
+```{r}
+# ADF test after differencing
+adf.test(dlog_retail_ts)
+```
+
+After first differencing, the series looks much more stable. Instead of increasing over time, the differenced log series fluctuates around a relatively constant center near zero. This suggests that differencing successfully removed the long-term trend from the original log series. Most of the monthly changes are small and stay within a narrow range, which is what we would expect from a growth-rate-style series rather than a level series.
+
+However, the differenced series is not perfectly smooth. There are several noticeable spikes and periods of larger fluctuation. The most obvious disruption occurs around 2020, where there is a sharp negative movement followed by a very large positive rebound. This aligns with the COVID-era shock to retail activity, when many businesses experienced sudden closures or reduced activity followed by rapid recovery in certain retail categories. There are also smaller fluctuations around the early 2000s and around 2008–2010. The later period is consistent with the Great Recession and financial crisis, while the earlier movement may reflect the 2001 recession and related economic slowdown. These observations are not treated as data errors because they represent real economic events. Instead, they are important features of the time series that may affect model fit, residual behavior, and forecasting performance.
+
+The Augmented Dickey-Fuller test also supports the visual evidence that first differencing improved stationarity. For the original log series, the ADF test failed to reject the null hypothesis of a unit root, meaning that the series still behaved like a nonstationary process. After first differencing, the ADF test statistic was -7.629 with a p-value reported as less than 0.01. Therefore, I reject the unit-root null hypothesis and conclude that the differenced log series is stationary enough to be used for ARMA-type modeling.
+
+The ACF and PACF plots also changed substantially after differencing. In the original log series, the ACF decayed very slowly, which was a strong sign of nonstationarity. After differencing, most of the autocorrelation values fall within the confidence bounds. This means the strong trend-driven dependence has been removed. The series no longer shows the extremely persistent behavior seen in the original log-level data.
+
+At the same time, the differenced series is not pure white noise. The ACF shows a noticeable negative spike at an early lag and a possible spike near the annual lag. The PACF also shows several early-lag movements, including negative partial autocorrelations and one larger positive spike later on. These remaining patterns suggest that there is still some short-term dependence structure left in the differenced series. That is actually useful for modeling: if the differenced series were completely white noise, there would be very little left to model beyond a random walk with drift. Instead, the remaining ACF/PACF structure suggests that ARIMA models with first differencing may improve fit and forecasting accuracy.
+
+Overall, the first differencing step appears successful. The differenced log series is much more stable than the original log series, the ADF test provides strong evidence of stationarity, and the ACF/PACF plots show that the major nonstationary pattern has been removed while still leaving some meaningful short-term dependence to model. Based on this, it is reasonable to move forward with ARIMA models using the log retail sales series with one order of differencing. Candidate models such as ARIMA(1,1,0), ARIMA(0,1,1), ARIMA(1,1,1), and slightly higher-order variations can now be compared using AICc, BIC, residual diagnostics, and forecast accuracy.
+
+# Initial ARIMA Model Comparison
+## ARIMA candidate models
+```{r}
+library(forecast)
+
+# Candidate ARIMA models on log retail sales
+fit_010 <- Arima(log_retail_ts, order = c(0, 1, 0), include.drift = TRUE)
+fit_110 <- Arima(log_retail_ts, order = c(1, 1, 0), include.drift = TRUE)
+fit_011 <- Arima(log_retail_ts, order = c(0, 1, 1), include.drift = TRUE)
+fit_111 <- Arima(log_retail_ts, order = c(1, 1, 1), include.drift = TRUE)
+fit_210 <- Arima(log_retail_ts, order = c(2, 1, 0), include.drift = TRUE)
+fit_012 <- Arima(log_retail_ts, order = c(0, 1, 2), include.drift = TRUE)
+fit_211 <- Arima(log_retail_ts, order = c(2, 1, 1), include.drift = TRUE)
+
+# Compare AICc
+model_compare <- data.frame(
+  Model = c("ARIMA(0,1,0)+drift",
+            "ARIMA(1,1,0)+drift",
+            "ARIMA(0,1,1)+drift",
+            "ARIMA(1,1,1)+drift",
+            "ARIMA(2,1,0)+drift",
+            "ARIMA(0,1,2)+drift",
+            "ARIMA(2,1,1)+drift"),
+  AICc = c(fit_010$aicc,
+           fit_110$aicc,
+           fit_011$aicc,
+           fit_111$aicc,
+           fit_210$aicc,
+           fit_012$aicc,
+           fit_211$aicc),
+  BIC = c(BIC(fit_010),
+          BIC(fit_110),
+          BIC(fit_011),
+          BIC(fit_111),
+          BIC(fit_210),
+          BIC(fit_012),
+          BIC(fit_211))
+)
+```
+
+## Comparison table
+```{r}
+model_compare <- model_compare[order(model_compare$AICc), ]
+model_compare
+```
+
+After confirming that the log-transformed retail sales series became much more stable after first differencing, I moved on to fitting ARIMA models. Since the original log series was nonstationary but the first-differenced log series appeared stationary, all candidate ARIMA models used one order of differencing. I also included a drift term because the original log-level series has a long-term upward trend, meaning the differenced log series represents monthly growth around a positive average rate rather than around exactly zero.
+
+The initial set of models included ARIMA(0,1,0), ARIMA(1,1,0), ARIMA(0,1,1), ARIMA(1,1,1), ARIMA(2,1,0), ARIMA(0,1,2), and ARIMA(2,1,1), all with drift. These models were chosen based on the ACF and PACF patterns of the differenced log series. After differencing, the ACF and PACF no longer showed the strong persistence seen in the original log series, but there were still a few noticeable early-lag spikes. This suggested that the differenced series was not white noise and that a short ARMA structure could improve the model.
+
+The model comparison was based on AICc and BIC. These criteria evaluate the tradeoff between goodness of fit and model complexity, with lower values preferred. The fact that the AICc and BIC values are negative is not a problem. These values are based on log-likelihood, and for continuous data, likelihood values can result in negative information criteria. The absolute value is not directly meaningful; what matters is the relative ranking among models fitted to the same dataset.
+
+Among the initial candidate models, **ARIMA(0,1,2)+drift** had the lowest AICc and BIC. Its AICc was **-2185.494**, and its BIC was **-2169.528**. Since both criteria selected the same model, ARIMA(0,1,2)+drift is the strongest candidate from this first round of model comparison. This model outperformed the ARIMA(2,1,1)+drift and ARIMA(2,1,0)+drift alternatives, although the differences among the top models were not extremely large. Therefore, it is better to describe ARIMA(0,1,2)+drift as the best initial candidate rather than as a final model by default.
+
+Substantively, this result suggests that after differencing the log retail sales series, the remaining dependence is better captured by moving-average terms than by autoregressive terms. In other words, monthly retail sales growth appears to respond to recent shocks or forecast errors from the previous one to two months. This interpretation is reasonable for economic data, where sudden changes in consumer activity can carry short-term effects into nearby months. The drift term captures the long-run average growth rate in the log series, which corresponds approximately to the average monthly percentage growth in retail sales.
+
+At this stage, ARIMA(0,1,2)+drift is selected as the leading ARIMA model based on information criteria. However, this does not automatically mean the model is adequate. The next step is to examine residual diagnostics, including residual plots, the residual ACF, the Ljung-Box test, and normality checks. If the residuals still show autocorrelation or strong non-normality, then the model may need to be revised or compared with additional approaches.
+
+# Residual Diagnostics for the Initial ARIMA Model
+## Residual diagnostics
+```{r}
+# Best initial ARIMA model
+best_arima <- fit_012
+
+summary(best_arima)
+
+# Residual diagnostics
+checkresiduals(best_arima)
+```
+
+## Residual plots and normality check
+```{r}
+# Additional residual plots
+resid_best <- residuals(best_arima)
+
+par(mfrow = c(2, 2))
+
+plot(resid_best,
+     main = "Residuals from ARIMA(0,1,2)+drift",
+     ylab = "Residuals",
+     xlab = "Year")
+
+acf(resid_best,
+    main = "ACF of ARIMA Residuals")
+
+pacf(resid_best,
+     main = "PACF of ARIMA Residuals")
+
+hist(resid_best,
+     main = "Histogram of ARIMA Residuals",
+     xlab = "Residuals",
+     breaks = 25)
+
+par(mfrow = c(1, 1))
+
+# Normality check
+shapiro.test(resid_best)
+```
+
+After selecting **ARIMA(0,1,2)+drift** as the leading candidate from the initial ARIMA comparison, I examined the residual diagnostics to check whether the model adequately captured the dependence structure in the log retail sales series. A model can have the best AICc or BIC among a group of candidates and still not be fully adequate, so residual checking is an important step before treating the model as final.
+
+The residual time plot shows that the residuals are mostly centered around zero, which is a good sign. There is no obvious remaining long-term trend in the residuals, suggesting that the first differencing and drift term handled the main nonstationary trend in the original log series. For most of the sample, the residuals stay within a relatively narrow range, meaning the model fits the regular month-to-month movement fairly well.
+
+However, the residuals are not completely random or stable. The largest residual movements occur around **2020**, where there is a sharp negative residual followed by large positive residuals. This is consistent with the COVID-era disruption and rebound in retail sales. Since ARIMA models are mainly designed to capture stable autocorrelation patterns, a sudden structural shock like COVID is difficult for a basic ARIMA model to absorb. There are also smaller spikes around the early 2000s and near the 2008–2010 period, which likely correspond to recession-related economic disruptions. These are not data errors, but they do create outliers that affect the model diagnostics.
+
+The residual ACF and PACF plots show that the model removed most of the serial dependence. Most residual autocorrelations fall within the confidence bounds, which suggests that the ARIMA(0,1,2)+drift model captures the main short-term dependence pattern in the differenced log series. However, the residuals are not perfectly white noise. There are still a few borderline or significant spikes, especially around later lags, which suggests that some weak dependence remains.
+
+The Ljung-Box test gives a p-value of **0.04377**. Since this is slightly below 0.05, I reject the null hypothesis that the residuals are independently distributed. This means the residuals still contain some statistically significant autocorrelation. However, the result is borderline rather than extreme. Visually, the residual ACF does not show a strong repeated pattern, so I interpret this as mild remaining autocorrelation rather than complete model failure.
+
+The histogram of the residuals shows that most residuals are tightly concentrated around zero, but there are long tails caused by several extreme observations. The Shapiro-Wilk test strongly rejects normality, with a p-value less than **2.2e-16**. This indicates that the residuals are not normally distributed. This result is not surprising because the series contains major real-world shocks, especially during the COVID period. The non-normality matters because it can affect formal inference and prediction intervals, but it does not automatically make the model useless for forecasting.
+
+Overall, the ARIMA(0,1,2)+drift model is a reasonable baseline model. It successfully removes the main trend, captures much of the short-term dependence, and produces residuals that are generally centered around zero. However, the diagnostics also show that the model is not perfect. There is mild remaining autocorrelation, strong non-normality, and several large shock-related residuals. Therefore, this model should be kept as an important benchmark, but it should be compared with additional models before making a final forecasting decision.
+
+# Automatic ARIMA Selection and Comparison
+```{r}
+library(forecast)
+
+# Automatic ARIMA search
+auto_fit <- auto.arima(
+  log_retail_ts,
+  seasonal = TRUE,
+  stepwise = FALSE,
+  approximation = FALSE,
+  allowdrift = TRUE,
+  allowmean = TRUE
+)
+
+summary(auto_fit)
+checkresiduals(auto_fit)
+
+# Compare with our manual best model
+data.frame(
+  Model = c("Manual ARIMA(0,1,2)+drift", "auto.arima selected model"),
+  AICc = c(best_arima$aicc, auto_fit$aicc),
+  BIC = c(BIC(best_arima), BIC(auto_fit))
+)
+```
+
+To check whether a more flexible ARIMA specification would improve the model, I also used an automatic ARIMA search. The selected model was ARIMA(0,1,2)(0,0,1)[12] with drift. This model keeps the same nonseasonal structure as the manually selected ARIMA(0,1,2)+drift model but adds a seasonal moving-average term at lag 12. This is reasonable to test because the residual ACF from the initial ARIMA model showed some possible remaining annual-lag behavior, even though the Census retail sales series is seasonally adjusted.
+
+The automatic ARIMA model had an AICc of -2185.691, which is slightly lower than the manual ARIMA(0,1,2)+drift model’s AICc of -2185.494. However, the difference is very small, less than 0.2 AICc units, so it does not represent a meaningful improvement in fit. In addition, the automatic model had a worse BIC, with a BIC of -2165.758 compared with -2169.528 for the simpler manual model. Since BIC penalizes additional parameters more heavily, this suggests that the seasonal MA term may not be worth the added complexity.
+
+The residual diagnostics also do not clearly improve under the automatic ARIMA model. The residuals remain centered around zero, but large outliers are still visible around 2020, corresponding to the COVID-era disruption and rebound in retail sales. The histogram remains sharply concentrated near zero with long tails, suggesting that the residuals are still strongly affected by extreme observations. The Ljung-Box test gives a p-value of 0.02933, which is below 0.05, so the residuals still show statistically significant autocorrelation. This is slightly worse than the Ljung-Box result for the manual ARIMA(0,1,2)+drift model.
+
+Overall, the automatic ARIMA model confirms that ARIMA(0,1,2)+drift is a reasonable structure for this series, since it selected the same nonseasonal form. However, the additional seasonal MA term does not provide enough improvement to justify the more complex model. Because the simpler ARIMA(0,1,2)+drift model has nearly identical AICc, better BIC, and slightly better residual diagnostics, I retain it as the main ARIMA benchmark. The automatic ARIMA model is still useful as part of the model competition, but it is not clearly superior.
+
+# 36-Month Holdout Forecast Evaluation
+## Forecasts and comparison
+```{r}
+library(forecast)
+
+# Hold out last 36 months
+h <- 36
+
+train_log <- head(log_retail_ts, length(log_retail_ts) - h)
+test_log  <- tail(log_retail_ts, h)
+
+train_sales <- head(retail_ts, length(retail_ts) - h)
+test_sales  <- tail(retail_ts, h)
+
+# Refit models on training data only
+fit_manual_train <- Arima(
+  train_log,
+  order = c(0, 1, 2),
+  include.drift = TRUE
+)
+
+fit_auto_train <- auto.arima(
+  train_log,
+  seasonal = TRUE,
+  stepwise = FALSE,
+  approximation = FALSE,
+  allowdrift = TRUE,
+  allowmean = TRUE
+)
+
+# Forecast 36 months ahead
+fc_manual_log <- forecast(fit_manual_train, h = h)
+fc_auto_log   <- forecast(fit_auto_train, h = h)
+
+# Convert log forecasts back to sales scale
+fc_manual_sales <- exp(fc_manual_log$mean)
+fc_auto_sales   <- exp(fc_auto_log$mean)
+
+# Accuracy on original sales scale
+manual_rmse <- sqrt(mean((test_sales - fc_manual_sales)^2))
+auto_rmse   <- sqrt(mean((test_sales - fc_auto_sales)^2))
+
+manual_mae <- mean(abs(test_sales - fc_manual_sales))
+auto_mae   <- mean(abs(test_sales - fc_auto_sales))
+
+manual_mape <- mean(abs((test_sales - fc_manual_sales) / test_sales)) * 100
+auto_mape   <- mean(abs((test_sales - fc_auto_sales) / test_sales)) * 100
+
+forecast_compare <- data.frame(
+  Model = c("Manual ARIMA(0,1,2)+drift", "auto.arima selected model"),
+  RMSE = c(manual_rmse, auto_rmse),
+  MAE = c(manual_mae, auto_mae),
+  MAPE = c(manual_mape, auto_mape)
+)
+
+forecast_compare
+```
+
+## Plots for the forecasts
+```{r}
+# Build time index for test period
+test_time <- time(test_sales)
+
+plot(retail_ts,
+     xlim = c(2020, 2026.5),
+     main = "36-Month Holdout Forecast Comparison",
+     ylab = "Retail Sales, Millions of Dollars",
+     xlab = "Year")
+
+lines(test_sales, col = "black", lwd = 2)
+lines(ts(fc_manual_sales, start = start(test_sales), frequency = 12),
+      col = "blue", lwd = 2)
+lines(ts(fc_auto_sales, start = start(test_sales), frequency = 12),
+      col = "red", lwd = 2)
+
+legend("topleft",
+       legend = c("Actual", "Manual ARIMA", "auto.arima"),
+       col = c("black", "blue", "red"),
+       lwd = 2,
+       bty = "n")
+```
+To evaluate out-of-sample forecasting performance, I used the last 36 months of the series as a holdout set. The models were trained on the earlier portion of the log-transformed retail sales series, then used to forecast the final 36 months. The forecasts were transformed back to the original sales scale so that forecast accuracy could be evaluated in millions of dollars.
+
+The manual ARIMA(0,1,2)+drift model and the automatic ARIMA model produced identical forecast accuracy on the holdout set. Both models had an RMSE of 15,580.3, an MAE of 13,508.31, and a MAPE of 1.89%. This indicates that the forecasts were off by less than 2% on average, which is a reasonably strong result for a monthly macroeconomic retail sales series.
+
+The forecast plot shows that both models capture the general upward movement of retail sales during the holdout period. However, the forecasts are smoother than the actual values and slightly overpredict sales toward the end of the period. This suggests that the ARIMA models are effective at capturing the broad trend and persistence in the data, but they are less responsive to smaller local changes in the growth rate.
+
+Since the manual and automatic ARIMA models perform the same in the holdout evaluation, the simpler ARIMA(0,1,2)+drift model remains the preferred ARIMA benchmark. The automatic ARIMA model does not provide a meaningful forecasting improvement, and its additional seasonal term is not necessary based on the holdout results.
+
+# Expanded Forecast Model Competition: Baseline, ETS, and Neural Network Models
+After evaluating the manual and automatic ARIMA models, I expanded the forecast comparison to include additional model classes. The purpose of this step was to avoid relying only on ARIMA-type models and to create a broader model competition. The additional models included a naive benchmark, a random walk with drift, an ETS model, and a neural network autoregression model. All models were trained on the same training period and evaluated on the final 36 months of the series. Forecasts were transformed back to the original retail sales scale before calculating RMSE, MAE, and MAPE.
+## Baseline forecasting models
+```{r}
+library(forecast)
+
+h <- 36
+
+train_log <- head(log_retail_ts, length(log_retail_ts) - h)
+test_log  <- tail(log_retail_ts, h)
+
+train_sales <- head(retail_ts, length(retail_ts) - h)
+test_sales  <- tail(retail_ts, h)
+
+# Baseline models on log scale
+fit_naive <- naive(train_log, h = h)
+fit_drift <- rwf(train_log, h = h, drift = TRUE)
+
+# Convert forecasts back to sales scale
+fc_naive_sales <- exp(fit_naive$mean)
+fc_drift_sales <- exp(fit_drift$mean)
+
+# Accuracy
+naive_rmse <- sqrt(mean((test_sales - fc_naive_sales)^2))
+drift_rmse <- sqrt(mean((test_sales - fc_drift_sales)^2))
+
+naive_mae <- mean(abs(test_sales - fc_naive_sales))
+drift_mae <- mean(abs(test_sales - fc_drift_sales))
+
+naive_mape <- mean(abs((test_sales - fc_naive_sales) / test_sales)) * 100
+drift_mape <- mean(abs((test_sales - fc_drift_sales) / test_sales)) * 100
+
+baseline_compare <- data.frame(
+  Model = c("Naive", "Random Walk with Drift"),
+  RMSE = c(naive_rmse, drift_rmse),
+  MAE = c(naive_mae, drift_mae),
+  MAPE = c(naive_mape, drift_mape)
+)
+
+baseline_compare
+```
+
+## ETS model
+```{r}
+# ETS model on log scale
+fit_ets <- ets(train_log)
+
+summary(fit_ets)
+
+fc_ets_log <- forecast(fit_ets, h = h)
+fc_ets_sales <- exp(fc_ets_log$mean)
+
+ets_rmse <- sqrt(mean((test_sales - fc_ets_sales)^2))
+ets_mae <- mean(abs(test_sales - fc_ets_sales))
+ets_mape <- mean(abs((test_sales - fc_ets_sales) / test_sales)) * 100
+
+ets_compare <- data.frame(
+  Model = "ETS",
+  RMSE = ets_rmse,
+  MAE = ets_mae,
+  MAPE = ets_mape
+)
+
+ets_compare
+```
+
+```{r}
+checkresiduals(fit_ets)
+```
+
+## Neural network autoregression model
+```{r}
+set.seed(123)
+
+fit_nnetar <- nnetar(train_log)
+
+summary(fit_nnetar)
+
+fc_nnetar_log <- forecast(fit_nnetar, h = h)
+fc_nnetar_sales <- exp(fc_nnetar_log$mean)
+
+nnetar_rmse <- sqrt(mean((test_sales - fc_nnetar_sales)^2))
+nnetar_mae <- mean(abs(test_sales - fc_nnetar_sales))
+nnetar_mape <- mean(abs((test_sales - fc_nnetar_sales) / test_sales)) * 100
+
+nnetar_compare <- data.frame(
+  Model = "Neural Network Autoregression",
+  RMSE = nnetar_rmse,
+  MAE = nnetar_mae,
+  MAPE = nnetar_mape
+)
+
+nnetar_compare
+```
+
+## Combine all forecast results
+```{r}
+all_forecast_compare <- data.frame(
+  Model = c(
+    "Naive",
+    "Random Walk with Drift",
+    "Manual ARIMA(0,1,2)+drift",
+    "auto.arima selected model",
+    "ETS",
+    "Neural Network Autoregression"
+  ),
+  RMSE = c(
+    naive_rmse,
+    drift_rmse,
+    manual_rmse,
+    auto_rmse,
+    ets_rmse,
+    nnetar_rmse
+  ),
+  MAE = c(
+    naive_mae,
+    drift_mae,
+    manual_mae,
+    auto_mae,
+    ets_mae,
+    nnetar_mae
+  ),
+  MAPE = c(
+    naive_mape,
+    drift_mape,
+    manual_mape,
+    auto_mape,
+    ets_mape,
+    nnetar_mape
+  )
+)
+
+all_forecast_compare <- all_forecast_compare[order(all_forecast_compare$RMSE), ]
+
+all_forecast_compare
+```
+## Plot all forecasts
+```{r}
+plot(retail_ts,
+     xlim = c(2020, 2026.5),
+     main = "36-Month Holdout Forecast Comparison Across Models",
+     ylab = "Retail Sales, Millions of Dollars",
+     xlab = "Year")
+
+lines(test_sales, col = "black", lwd = 2)
+
+lines(ts(fc_naive_sales, start = start(test_sales), frequency = 12),
+      col = "gray", lwd = 2)
+
+lines(ts(fc_drift_sales, start = start(test_sales), frequency = 12),
+      col = "orange", lwd = 2)
+
+lines(ts(fc_manual_sales, start = start(test_sales), frequency = 12),
+      col = "blue", lwd = 2)
+
+lines(ts(fc_ets_sales, start = start(test_sales), frequency = 12),
+      col = "green", lwd = 2)
+
+lines(ts(fc_nnetar_sales, start = start(test_sales), frequency = 12),
+      col = "purple", lwd = 2)
+
+legend("topleft",
+       legend = c("Actual", "Naive", "Drift", "ARIMA", "ETS", "NNAR"),
+       col = c("black", "gray", "orange", "blue", "green", "purple"),
+       lwd = 2,
+       bty = "n",
+       cex = 0.8)
+```
+
+The random walk with drift model performed the best across all three accuracy measures. It had an RMSE of 11,524.63, an MAE of 10,093.99, and a MAPE of 1.414%. This indicates that, over the 36-month holdout period, the model’s forecasts were off by about 1.4% on average. For a monthly macroeconomic retail sales series, this is a strong result. The success of this model suggests that the most important forecasting information in the series is the current level combined with the long-run average upward drift.
+
+The ETS model was the second-best model, with an RMSE of 12,862.62 and a MAPE of 1.569%. This model also captured the general upward trend of retail sales reasonably well, although it was slightly less accurate than the random walk with drift model. Since ETS models are designed to handle level and trend components directly, its strong performance is not surprising. However, it did not provide enough improvement to replace the simpler drift model.
+
+The manual ARIMA(0,1,2)+drift model and the automatic ARIMA model produced identical holdout accuracy, both with an RMSE of 15,580.30 and a MAPE of 1.889%. These results are still reasonably good, but they are weaker than the random walk with drift and ETS models. Visually, the ARIMA forecasts capture the overall upward direction of the series but are somewhat too smooth and slightly overpredict the actual values near the end of the holdout period. Since the automatic ARIMA model did not improve forecast accuracy over the manual ARIMA model, the simpler manual ARIMA model remains the preferred ARIMA benchmark.
+
+The neural network autoregression model performed poorly compared with the other methods, with an RMSE of 38,962.54 and a MAPE of 4.720%. The forecast plot shows that this model produced a relatively flat forecast and did not adequately continue the upward trend in retail sales. This result is useful because it shows that a more flexible machine learning model is not automatically better for this type of time series. In this case, the neural network model was less effective at extrapolating the trend than simpler statistical forecasting methods.
+
+The naive model had the weakest performance overall, with an RMSE of 46,561.17 and a MAPE of 5.721%. This is expected because the naive model simply carries the last observed value forward. Since retail sales continued to grow during the holdout period, the naive forecast quickly became too low.
+
+Overall, the expanded model competition shows that the random walk with drift model provides the best out-of-sample forecasting performance. Although ARIMA and ETS models were useful and reasonably accurate, the drift model had the lowest RMSE, MAE, and MAPE. Therefore, the random walk with drift model is selected as the final forecasting model for this project.
+
+# Conclusion, Business Value, and Future Work
+This project analyzed monthly seasonally adjusted U.S. retail and food services sales from January 1992 to March 2026. The purpose of the analysis was to study the time series structure of retail sales and compare multiple forecasting approaches. The original series showed a strong upward trend and clear nonstationarity, which was confirmed by the time plot, ACF behavior, and Augmented Dickey-Fuller test. After applying a log transformation and first differencing, the series became much more stable and suitable for ARIMA-type modeling.
+
+The initial ARIMA analysis showed that ARIMA(0,1,2)+drift was the strongest candidate among the manually selected ARIMA models based on AICc and BIC. This model captured the main nonstationary trend through differencing and represented the remaining short-term dependence using moving-average terms. However, residual diagnostics showed that the model was not perfect. The residuals were centered around zero, but the Ljung-Box test suggested mild remaining autocorrelation, and the Shapiro-Wilk test strongly rejected normality. The largest residual problems occurred around major economic disruptions, especially the COVID-era shock and rebound. This suggests that standard ARIMA models can capture regular time series dependence fairly well, but they have difficulty handling sudden structural shocks.
+
+To strengthen the analysis, I expanded the model comparison beyond ARIMA models. The final forecast competition included naive, random walk with drift, manual ARIMA, automatic ARIMA, ETS, and neural network autoregression models. All models were evaluated on the same 36-month holdout period using RMSE, MAE, and MAPE. The random walk with drift model performed best across all three accuracy measures, with an RMSE of 11,524.63, an MAE of 10,093.99, and a MAPE of 1.414%. The ETS model was the second-best performer, while the ARIMA models were still reasonable but less accurate. The neural network autoregression model and the naive model performed noticeably worse.
+
+The main finding is that the best forecasting model was not the most complicated model. Instead, the random walk with drift model gave the strongest out-of-sample performance. This makes sense for this dataset because retail sales have a persistent upward trend, and the most useful short-term forecasting information appears to be the most recent sales level plus the long-run average growth rate. The neural network model’s weaker performance also shows that more flexible machine learning methods do not automatically improve forecasting accuracy, especially when the model struggles to extrapolate a stable trend.
+
+From a business perspective, this type of analysis has clear practical value. Retail sales forecasts can support inventory planning, staffing decisions, budgeting, revenue expectations, supply chain management, and broader market analysis. Even small improvements in forecast accuracy can matter when the sales volume is measured in hundreds of billions of dollars. A model with a MAPE near 1.4% could provide a useful high-level benchmark for understanding expected national retail activity over the next several months.
+
+There is also broader economic and social value in this type of forecasting. Retail sales are closely related to consumer demand, employment, inflation pressure, and overall economic health. Better forecasting can help businesses prepare for changes in consumer spending, but it can also help policymakers and analysts monitor economic slowdowns or recoveries. For example, the large disruptions around 2001, 2008–2010, and 2020 show that retail activity is sensitive to major economic shocks. Understanding these movements can help identify periods when households, workers, and businesses may be under stress.
+
+At the same time, this analysis has limitations. The dataset used here is aggregate national retail sales, so it does not capture differences across industries, regions, income groups, or types of retailers. A national-level forecast may be useful for macroeconomic monitoring, but it may not fully reflect the experiences of small businesses, local economies, or specific consumer groups. Another limitation is that the models are mostly univariate, meaning they only use past retail sales to forecast future retail sales. They do not include outside predictors such as inflation, unemployment, interest rates, consumer sentiment, gas prices, or holiday effects. Including those variables could improve interpretability and potentially improve forecast accuracy.
+
+Future work could extend this project in several ways. One improvement would be to build a dynamic regression model using economic predictors such as CPI, unemployment rate, federal funds rate, or consumer sentiment. Another extension would be to model specific retail categories separately instead of using total retail and food services sales. This could reveal whether certain sectors are more volatile, more seasonal, or more sensitive to economic shocks. Finally, the COVID period could be modeled explicitly using intervention variables or outlier-adjusted models, since standard ARIMA and ETS models have difficulty capturing sudden structural breaks.
+
+Overall, this project shows that careful time series analysis requires more than simply fitting one model. The process involved visual inspection, transformation, stationarity checks, ARIMA identification, residual diagnostics, and out-of-sample forecast comparison. Based on the final model competition, the random walk with drift model is selected as the best forecasting model for this dataset. The result is both statistically reasonable and practically useful: for monthly U.S. retail sales, a simple growth-based forecasting approach outperformed more complex alternatives during the holdout period.
